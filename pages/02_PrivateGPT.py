@@ -1,13 +1,15 @@
 from langchain.prompts import ChatPromptTemplate
 from langchain_community.document_loaders import UnstructuredFileLoader
-from langchain.embeddings import CacheBackedEmbeddings
+from langchain.embeddings import CacheBackedEmbeddings, OllamaEmbeddings
 from langchain.storage import LocalFileStore
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_openai import OpenAIEmbeddings
 import streamlit as st
-from langchain_openai import ChatOpenAI
+
+# from langchain_openai import ChatOpenAI
+from langchain_community.chat_models import ChatOllama
 import os
 from langchain.callbacks.base import BaseCallbackHandler
 
@@ -30,7 +32,9 @@ class ChatCallbackHandler(BaseCallbackHandler):
         self.message_box.markdown(self.message)
 
 
-llm = ChatOpenAI(streaming=True, callbacks=[ChatCallbackHandler()])
+llm = ChatOllama(
+    model="mistral:latest", streaming=True, callbacks=[ChatCallbackHandler()]
+)
 
 st.markdown(
     """
@@ -74,7 +78,7 @@ def embed_file(file):
     # 오류: 항상 chapter_one.txt만 로드함. 아래처럼 수정 필요:
     loader = UnstructuredFileLoader(file_path)
     docs = loader.load_and_split(text_splitter=splitter)
-    embeddings = OpenAIEmbeddings()
+    embeddings = OllamaEmbeddings(model="mistral:latest")
     cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
     vectorstore = Chroma.from_documents(docs, cached_embeddings)
     retriever = vectorstore.as_retriever()
