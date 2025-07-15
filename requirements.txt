@@ -1,18 +1,16 @@
-# ─── Streamlit ───
-streamlit==1.46.1          # 최신 버전 OK
+########## Streamlit ##########
+streamlit==1.46.1          # UI 프레임워크
 
-# ─── LangChain 0.2 계열 + OpenAI provider ───
+########## LangChain 0.2 계열 ##########
 langchain==0.2.1
-langchain-openai==0.1.9    # ★ 0.1.9 이상이면 langchain-core 0.2.x 와 호환
+langchain-openai==0.1.9     # 0.1.9 이상 → langchain-core 0.2.x와 호환
 langchain-community==0.2.1
-tiktoken==0.9.0
+tiktoken==0.9.0             # 토큰 계산
 
-# ─── Vector store ───
-faiss-cpu==1.7.4           # CPU wheel (GPU 안 씀)
+########## Vector Store ##########
+# Python 3.11 이하에서 미리 빌드된 wheel 사용 가능
+faiss-cpu==1.7.4           
 
-# ─── HTML/웹 로더 ───
+########## Web/HTML 로더 ##########
 beautifulsoup4==4.12.3
 requests==2.31.0
-
-# (필요 없으면 지우세요)
-# aiohappyeyeballs==2.6.1
