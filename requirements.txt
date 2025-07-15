@@ -1,19 +1,18 @@
-# ────────── core ──────────
-streamlit==1.46.1
+# ─── Streamlit ───
+streamlit==1.46.1          # 최신 버전 OK
 
-# LangChain 0.2 계열 (OpenAI provider 분리)
+# ─── LangChain 0.2 계열 + OpenAI provider ───
 langchain==0.2.1
-langchain-openai==0.1.3
+langchain-openai==0.1.9    # ★ 0.1.9 이상이면 langchain-core 0.2.x 와 호환
 langchain-community==0.2.1
-tiktoken==0.9.0          # 토큰 카운트
+tiktoken==0.9.0
 
-# ────────── 벡터 스토어 ──────────
-faiss-cpu==1.7.4         # CPU wheel
+# ─── Vector store ───
+faiss-cpu==1.7.4           # CPU wheel (GPU 안 씀)
 
-# ────────── HTML/웹 로딩 ──────────
-beautifulsoup4==4.12.3   # WebBaseLoader 내부 의존
-requests==2.31.0         # 네트워크 호출(명시해두면 안정적)
+# ─── HTML/웹 로더 ───
+beautifulsoup4==4.12.3
+requests==2.31.0
 
-# ────────── 선택(크롤링 속도 개선·PDF 등 필요시) ──────────
-# unstructured==0.18.3
-# pydantic==2.7.1         # langchain-core 종속성 해결용(보통 자동 설치됨)
+# (필요 없으면 지우세요)
+# aiohappyeyeballs==2.6.1
