@@ -9,7 +9,7 @@ tiktoken==0.9.0             # 토큰 계산
 
 ########## Vector Store ##########
 # Python 3.11 이하에서 미리 빌드된 wheel 사용 가능
-faiss-cpu==1.7.4           
+# faiss-cpu==1.7.4           
 
 ########## Web/HTML 로더 ##########
 beautifulsoup4==4.12.3
