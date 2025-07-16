@@ -1,225 +1,306 @@
-import os, json
+import json
+import os
+from httpx import Response
+from langchain.prompts import ChatPromptTemplate
+from langchain.retrievers import WikipediaRetriever
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.document_loaders import UnstructuredFileLoader
+from langchain_core import output_parsers
+from pydantic import Json
 import streamlit as st
-from openai import OpenAI
-from openai.types.chat import (
-    ChatCompletionMessageParam,
-    ChatCompletionMessage,
+from langchain_openai import ChatOpenAI
+from langchain.callbacks import StreamingStdOutCallbackHandler
+from langchain.schema import BaseOutputParser
+
+#
+# JSONDecodeError: Expecting value: line 1 column 1 (char 0) 에러는
+# json.loads()가 빈 문자열이나 유효하지 않은 JSON을 파싱하려고 할 때 발생합니다.
+# 즉, LLM의 출력이 비어있거나, JSON 형식이 아니거나, 앞에 불필요한 텍스트가 있을 때 주로 발생합니다.
+#
+# 원인 예시:
+# - LLM이 아무 응답도 반환하지 않음 (빈 문자열)
+# - LLM이 JSON이 아닌 텍스트(예: 설명, 코드블록 마크다운 등)를 반환
+# - LLM이 JSON 앞에 불필요한 텍스트(예: "Here is your quiz:" 등)를 붙여서 반환
+#
+# 해결 방법:
+# - LLM 프롬프트를 더 명확하게 하거나, 응답에서 JSON만 추출하는 후처리 추가
+# - 출력이 비어있을 때 예외처리 추가
+
+
+class JsonOutputParsor(BaseOutputParser):
+    def parse(self, text):
+        text = text.replace("```", "").replace("json", "")
+        text = text.strip()
+        if not text:
+            raise ValueError("LLM output is empty. Cannot parse JSON.")
+        return json.loads(text)
+
+
+output_parsers = JsonOutputParsor()
+st.set_page_config(page_title="QuizGPT", page_icon="🤔")
+
+st.title("QuizGPT")
+llm = ChatOpenAI(
+    temperature=0.1,
+    model="gpt-3.5-turbo-1106",
+    streaming=True,
+    callbacks=[StreamingStdOutCallbackHandler()],
 )
 
-# ---------- Sidebar : API Key · 깃허브 링크 · 옵션 ----------
-st.sidebar.header("🎯 QuizGPT 설정")
-api_key = st.sidebar.text_input("🔑 OpenAI API Key", type="password")
-gh_url = "https://github.com/Jonghyun-Park1027/GPT_side_project/tree/main"  # 수정하세요
-st.sidebar.markdown(f"[📂 GitHub 리포지터리]({gh_url})")
 
-difficulty = st.sidebar.selectbox(
-    "🧩 난이도",
-    options=["easy", "hard"],
-    index=0,
-    help="easy → 쉬운 문제, hard → 어려운 문제",
-)
-
-num_questions = st.sidebar.slider(
-    "❓ 문제 수", 3, 15, 5, help="한 회차에 출제될 문제 개수"
-)
-
-# ---------- 세션 상태 ----------
-if "quiz" not in st.session_state:
-    st.session_state.quiz = []
-if "answers" not in st.session_state:
-    st.session_state.answers = {}
-if "score" not in st.session_state:
-    st.session_state.score = None
-if "quiz_ready" not in st.session_state:
-    st.session_state.quiz_ready = False
+def format_docs(docs):
+    return "\n\n".join(document.page_content for document in docs)
 
 
-# ---------- OpenAI 클라이언트 ----------
-def get_client():
-    if not api_key:
-        st.warning("좌측 사이드바에 OpenAI API Key를 입력하세요.")
-        st.stop()
-    os.environ["OPENAI_API_KEY"] = api_key
-    return OpenAI(api_key=api_key)
-
-
-# ---------- LLM 함수 호출 스펙 ----------
-FUNC_SPEC = [
-    {
-        "name": "generate_quiz",
-        "description": "주어진 난이도와 개수에 맞게 퀴즈를 생성한다.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "difficulty": {
-                    "type": "string",
-                    "enum": ["easy", "hard"],
-                    "description": "퀴즈 난이도",
-                },
-                "num_questions": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "description": "문제 개수",
-                },
-            },
-            "required": ["difficulty", "num_questions"],
-        },
-    }
-]
-
-
-# ---------- 실제 퀴즈 생성 함수 ----------
-def _generate_quiz_locally(difficulty: str, num_questions: int) -> list[dict]:
-    client = get_client()
-    prompt = (
-        f"Create {num_questions} {difficulty} general-knowledge quiz questions.\n"
-        "Return *only* valid JSON list. "
-        "Each item must have keys: question, answer."
-    )
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
+questions_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+        You are a helpful assistant that is role playing as a teacher.
+         
+    Based ONLY on the following context make 10 questions to test the user's knowledge about the text.
+    
+    Each question should have 4 answers, three of them must be incorrect and one should be correct.
+         
+    Use (o) to signal the correct answer.
+         
+    Question examples:
+         
+    Question: What is the color of the ocean?
+    Answers: Red|Yellow|Green|Blue(o)
+         
+    Question: What is the capital or Georgia?
+    Answers: Baku|Tbilisi(o)|Manila|Beirut
+         
+    Question: When was Avatar released?
+    Answers: 2007|2001|2009(o)|1998
+         
+    Question: Who was Julius Caesar?
+    Answers: A Roman Emperor(o)|Painter|Actor|Model
+         
+    Your turn!
+         
+    Context: {context}
+        """,
         )
-        content = resp.choices[0].message.content
-        if not content:
-            raise ValueError("응답이 비어 있습니다.")
-        content = content.strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-        try:
-            quiz = json.loads(content)
-        except Exception as e:
-            st.error(
-                "⚠️ 퀴즈 생성에 실패했습니다. 다시 시도해 주세요.\n\n"
-                "에러: JSON 파싱 실패. 모델이 JSON 이외의 형식(코드블록 등)으로 응답했을 수 있습니다.\n"
-                f"원본 응답:\n\n{content}\n\n에러: {e}"
-            )
-            st.stop()
-        if not isinstance(quiz, list):
-            raise ValueError("응답이 리스트 형태의 JSON이 아닙니다.")
-    except Exception as e:
-        st.error(f"⚠️ 퀴즈 생성에 실패했습니다. 다시 시도해 주세요.\n\n에러: {e}")
-        st.stop()
-    return quiz
-
-
-# ---------- LLM 함수 호출 엔드포인트 ----------
-def create_quiz_with_function_call(diff: str, n: int) -> list[dict]:
-    client = get_client()
-    messages: list[ChatCompletionMessageParam] = [
-        {
-            "role": "system",
-            "content": "You are QuizGPT. "
-            "When the user requests a quiz, you must call the "
-            "function `generate_quiz` with proper arguments.",
-        },
-        {"role": "user", "content": f"Give me a {diff} quiz with {n} questions."},
     ]
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            functions=FUNC_SPEC,  # type: ignore
-            function_call={"name": "generate_quiz"},
+)
+questions_chain = {"context": format_docs} | questions_prompt | llm
+formatting_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+    You are a powerful formatting algorithm.
+     
+    You format exam questions into JSON format.
+    Answers with (o) are the correct ones.
+     
+    Example Input:
+
+    Question: What is the color of the ocean?
+    Answers: Red|Yellow|Green|Blue(o)
+         
+    Question: What is the capital or Georgia?
+    Answers: Baku|Tbilisi(o)|Manila|Beirut
+         
+    Question: When was Avatar released?
+    Answers: 2007|2001|2009(o)|1998
+         
+    Question: Who was Julius Caesar?
+    Answers: A Roman Emperor(o)|Painter|Actor|Model
+    
+     
+    Example Output:
+     
+    ```json
+    {{ "questions": [
+            {{
+                "question": "What is the color of the ocean?",
+                "answers": [
+                        {{
+                            "answer": "Red",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "Yellow",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "Green",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "Blue",
+                            "correct": true
+                        }}
+                ]
+            }},
+                        {{
+                "question": "What is the capital or Georgia?",
+                "answers": [
+                        {{
+                            "answer": "Baku",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "Tbilisi",
+                            "correct": true
+                        }},
+                        {{
+                            "answer": "Manila",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "Beirut",
+                            "correct": false
+                        }}
+                ]
+            }},
+                        {{
+                "question": "When was Avatar released?",
+                "answers": [
+                        {{
+                            "answer": "2007",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "2001",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "2009",
+                            "correct": true
+                        }},
+                        {{
+                            "answer": "1998",
+                            "correct": false
+                        }}
+                ]
+            }},
+            {{
+                "question": "Who was Julius Caesar?",
+                "answers": [
+                        {{
+                            "answer": "A Roman Emperor",
+                            "correct": true
+                        }},
+                        {{
+                            "answer": "Painter",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "Actor",
+                            "correct": false
+                        }},
+                        {{
+                            "answer": "Model",
+                            "correct": false
+                        }}
+                ]
+            }}
+        ]
+     }}
+    ```
+    Your turn!
+
+    Questions: {context}
+
+""",
         )
-        choice = resp.choices[0]
-        msg = choice.message
-        function_call = getattr(msg, "function_call", None)
-        if not function_call or not getattr(function_call, "arguments", None):
-            raise ValueError(
-                f"함수 호출 정보가 없습니다. (function_call: {function_call})\n"
-                f"모델 응답: {getattr(msg, 'content', '') or msg}"
-            )
-        arguments = function_call.arguments
-        args = json.loads(arguments)
-        return _generate_quiz_locally(
-            difficulty=args["difficulty"], num_questions=args["num_questions"]
+    ]
+)
+
+formatting_chain = formatting_prompt | llm
+
+
+@st.cache_resource(show_spinner="Loading file...")
+def split_file(file):
+    file_content = file.read()
+    file_path = f"./.cache/quiz_files/{file.name}"
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "wb") as f:
+        f.write(file_content)
+    splitter = CharacterTextSplitter.from_tiktoken_encoder(
+        separator="\n",
+        chunk_size=600,
+        chunk_overlap=100,
+    )
+    loader = UnstructuredFileLoader(file_path)
+    docs = loader.load_and_split(text_splitter=splitter)
+    return docs
+
+
+@st.cache_data(show_spinner="Search WIkipedia...")
+def wiki_search(term):
+    retriever = WikipediaRetriever(wiki_client=None, top_k_results=5)
+
+    docs = retriever.get_relevant_documents(term)
+    return docs
+
+
+@st.cache_data(show_spinner="Making quiz....")
+def run_quiz_chain(_docs):
+    chain = {"context": questions_chain} | formatting_chain | JsonOutputParsor()
+    response = chain.invoke(_docs)
+    return response
+
+
+with st.sidebar:
+    docs = None
+    choice = st.selectbox(
+        "Choose what you want to use",
+        (
+            "File",
+            "Wikipedia Article",
+        ),
+    )
+
+    if choice == "File":
+        file = st.file_uploader(
+            "Upload a .docx, .txt,or .pdf file", type=["pdf", "txt", "docx"]
         )
-    except Exception as e:
-        st.error(f"⚠️ 퀴즈 생성에 실패했습니다. 다시 시도해 주세요.\n\n에러: {e}")
-        st.stop()
-
-
-# ---------- 시험 시작 / 재시작 ----------
-def start_new_quiz():
-    st.session_state.quiz = create_quiz_with_function_call(difficulty, num_questions)
-    st.session_state.answers = {}
-    st.session_state.score = None
-    st.session_state.quiz_ready = True
-
-
-# ---------- UI ----------
-st.title("📝 QuizGPT")
-
-# Start Quiz 버튼을 누르면 바로 문제를 생성하고 화면에 표시
-start_clicked = st.session_state.get("start_clicked", False)
-if not st.session_state.quiz_ready and not start_clicked:
-    st.write("설정을 확인한 뒤 **Start Quiz** 버튼을 눌러 주세요!")
-    if st.button("🚀 Start Quiz"):
-        start_new_quiz()
-        st.session_state.start_clicked = True
-        st.rerun()
-    st.stop()
-elif not st.session_state.quiz_ready and start_clicked:
-    # 문제 생성 중이거나 생성 직후 rerun
-    st.write("문제를 생성 중입니다. 잠시만 기다려 주세요...")
-    st.stop()
-
-quiz = st.session_state.quiz
-
-# ---------- 문제 표시 ----------
-with st.form("quiz_form"):
-    for idx, q in enumerate(quiz, start=1):
-        st.markdown(f"**Q{idx}. {q['question']}**")
-        st.text_input("답 :", key=f"answer_{idx}")
-    submitted = st.form_submit_button("✅ 제출")
-
-# ---------- 채점 ----------
-if submitted:
-    answers = {}
-    score = 0
-    for idx, q in enumerate(quiz, start=1):
-        user_ans = st.session_state.get(f"answer_{idx}", "").strip()
-        correct_ans = q["answer"].strip()
-        answers[idx] = {"user": user_ans, "correct": correct_ans}
-        if user_ans.lower() == correct_ans.lower():
-            score += 1
-
-    st.session_state.answers = answers
-    st.session_state.score = score
-    st.session_state.quiz_ready = False
-    st.session_state.start_clicked = False  # 결과 화면에서 다시 시작 가능
-
-# ---------- 결과 ----------
-if st.session_state.score is not None:
-    total = len(quiz)
-    score = st.session_state.score
-    st.subheader(f"🎯 점수 : {score} / {total}")
-
-    with st.expander("정답 확인"):
-        for idx in range(1, total + 1):
-            ua = st.session_state.answers[idx]["user"] or "🈳 (무응답)"
-            ca = st.session_state.answers[idx]["correct"]
-            emoji = "✅" if ua.lower() == ca.lower() else "❌"
-            st.markdown(
-                f"**Q{idx}** {emoji}  \n"
-                f"- Your answer : {ua}  \n"
-                f"- Correct      : {ca}"
-            )
-
-    if score == total:
-        st.success("만점입니다! 축하합니다! 🎉")
-        st.balloons()
+        if file:
+            docs = split_file(file)
+            st.write(docs)
     else:
-        if st.button("🔄 다시 도전하기"):
-            start_new_quiz()
-            st.session_state.start_clicked = False
-            st.rerun()
+        topic = st.text_input("Search WIkipedia...")
+
+        if topic:
+            docs = wiki_search(topic)
+
+if not docs:
+    st.markdown(
+        """
+        Welcome to QuizGPT.
+        I will make a quiz from wikipedia articles or files you upload to test your knowledge and help you study.
+        Get started by uploading a file or searching on WIkipedia in the sidebar
+        """
+    )
+else:
+    if "quiz_generated" not in st.session_state:
+        st.session_state.quiz_generated = False
+        st.session_state.quiz_response = None
+
+    if not st.session_state.quiz_generated:
+        if st.button("generate quiz"):
+            st.session_state.quiz_response = run_quiz_chain(docs)
+            st.session_state.quiz_generated = True
+
+    if st.session_state.quiz_generated and st.session_state.quiz_response:
+        response = st.session_state.quiz_response
+        st.write(response)
+        with st.form("questions_form"):
+            for question in response["questions"]:
+                st.write(question["question"])
+                value = st.radio(
+                    "Select an option.",
+                    [answer["answer"] for answer in question["answers"]],
+                    index=None,
+                )
+                if st.write({"answer": value, "correct": True} in question["answers"]):
+                    st.success("Correct")
+                elif value is not None:
+                    st.error("Wrong")
+            button = st.form_submit_button()

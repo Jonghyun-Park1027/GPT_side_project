@@ -33,7 +33,7 @@ class ChatCallbackHandler(BaseCallbackHandler):
 
 
 llm = ChatOllama(
-    model="deepseek-r1:8b",
+    model="mistral:latest",
     # streaming=True,
     callbacks=[ChatCallbackHandler()],
 )
@@ -71,7 +71,7 @@ def embed_file(file):
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, "wb") as f:
         f.write(file_content)
-    cache_dir = LocalFileStore(f"./.cache/private_mbeddings/{file.name}")
+    cache_dir = LocalFileStore(f"./.cache/private_embeddings/{file.name}")
     splitter = CharacterTextSplitter.from_tiktoken_encoder(
         separator="\n",
         chunk_size=600,
@@ -80,7 +80,7 @@ def embed_file(file):
     # 오류: 항상 chapter_one.txt만 로드함. 아래처럼 수정 필요:
     loader = UnstructuredFileLoader(file_path)
     docs = loader.load_and_split(text_splitter=splitter)
-    embeddings = OllamaEmbeddings(model="deepseek-r1:8b")
+    embeddings = OllamaEmbeddings(model="mistral:latest")
     cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
     vectorstore = Chroma.from_documents(docs, cached_embeddings)
     retriever = vectorstore.as_retriever()
