@@ -1,135 +1,123 @@
-import os
-import pathlib
-from datetime import datetime
-
-import streamlit as st
-from langchain_openai import ChatOpenAI
-from langchain.chains import RetrievalQA
-from langchain.document_loaders.sitemap import SitemapLoader
-from langchain.document_loaders import WebBaseLoader
+from langchain.document_loaders import SitemapLoader
+from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores.faiss import FAISS
 from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+import streamlit as st
 
-
-# ───────────────────────────────────── Sidebar ───────────────────────────────────
-st.sidebar.header("🤖 Cloudflare SiteGPT")
-api_key = st.sidebar.text_input("🔑 OpenAI API Key", type="password")
-st.sidebar.markdown(
-    "[📂 GitHub Repository](https://github.com/your-github-id/cloudflare-sitegpt)"
+llm = ChatOpenAI(
+    temperature=0.1,
 )
 
-if not api_key:
-    st.info("먼저 OpenAI API Key를 입력하세요.")
-    st.stop()
+answers_prompt = ChatPromptTemplate.from_template(
+    """
+    Using ONLY the following context answer the user's question. If you can't just say you don't know, don't make anything up.
+                                                  
+    Then, give a score to the answer between 0 and 5.
 
-os.environ["OPENAI_API_KEY"] = api_key
+    If the answer answers the user question the score should be high, else it should be low.
 
-# ───────────────────────────────────── Settings ──────────────────────────────────
-SITEMAP_INDEX = "https://developers.cloudflare.com/sitemap-0.xml"
-CF_PRODUCTS = {
-    "AI Gateway": "ai-gateway",
-    "Vectorize": "vectorize",
-    "Workers AI": "workers-ai",
-}
-NOMAD_URL = "https://nomadcoders.co/c/gpt-challenge/lobby"
+    Make sure to always include the answer's score even if it's 0.
 
-CACHE_DIR = pathlib.Path(".cache")
-CACHE_DIR.mkdir(exist_ok=True)
+    Context: {context}
+                                                  
+    Examples:
+                                                  
+    Question: How far away is the moon?
+    Answer: The moon is 384,400 km away.
+    Score: 5
+                                                  
+    Question: How far away is the sun?
+    Answer: I don't know
+    Score: 0
+                                                  
+    Your turn!
 
-# ────────────────────────────────── Loader Functions ─────────────────────────────
-
-
-def load_cf_docs(selected_slugs: list[str]):
-    """Load Cloudflare docs from master sitemap filtered by product slugs"""
-    patterns = [rf".*{slug}/.*" for slug in selected_slugs]
-    loader = SitemapLoader(web_path=SITEMAP_INDEX, filter_urls=patterns)
-    docs = loader.load()
-    for d in docs:
-        # Extract product name from URL path
-        for name, slug in CF_PRODUCTS.items():
-            if f"/{slug}/" in d.metadata.get("source", ""):
-                d.metadata["product"] = name
-                break
-    return docs
+    Question: {question}
+"""
+)
 
 
-def load_nomad_doc():
-    loader = WebBaseLoader(NOMAD_URL)
-    docs = loader.load()
-    for d in docs:
-        d.metadata["product"] = "Nomad GPT Challenge"
-    return docs
-
-
-def build_or_load_chroma(selected_products: list[str]):
-    key = "_".join(sorted(selected_products)).replace(" ", "_").lower()
-    store_path = CACHE_DIR / f"{key}_chroma"
-
-    # Chroma uses a directory for persistence
-    if store_path.exists() and any(store_path.iterdir()):
-        return Chroma(
-            persist_directory=str(store_path), embedding_function=OpenAIEmbeddings()
+def get_answers(inputs):
+    docs = inputs["docs"]
+    question = inputs["question"]
+    answers_chain = answers_prompt | llm
+    answers = []
+    for doc in docs:
+        result = answers_chain.invoke(
+            {"question": question, "context": doc.page_content}
         )
+        answers.append(result.content)
+    st.write(answers)
 
-    # --- Load docs ---
-    cf_slugs = [CF_PRODUCTS[p] for p in selected_products if p in CF_PRODUCTS]
-    docs = load_cf_docs(cf_slugs)
-    if "Nomad GPT Challenge" in selected_products:
-        docs += load_nomad_doc()
 
-    # --- Split & embed ---
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-    chunks = splitter.split_documents(docs)
-    vectordb = Chroma.from_documents(
-        chunks, OpenAIEmbeddings(), persist_directory=str(store_path)
+def parse_page(soup):
+    header = soup.find("header")
+    footer = soup.find("footer")
+    if header:
+        header.decompose()
+    if footer:
+        footer.decompose()
+    return (
+        str(soup.get_text())
+        .replace("\n", " ")
+        .replace("\xa0", " ")
+        .replace("CloseSearch Submit Blog", "")
     )
-    vectordb.persist()
-    return vectordb
 
 
-# ───────────────────────────────────── UI Inputs ─────────────────────────────────
-available_products = list(CF_PRODUCTS.keys()) + ["Nomad GPT Challenge"]
-selected_products = st.sidebar.multiselect(
-    "대상 문서", available_products, default=available_products
+@st.cache_data(show_spinner="Loading website...")
+def load_website(url):
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=1000,
+        chunk_overlap=100,
+    )
+    loader = SitemapLoader(
+        url,
+        parsing_function=parse_page,
+    )
+    loader.requests_per_second = 2
+    docs = loader.load_and_split(text_splitter=splitter)
+    vector_store = FAISS.from_documents(docs, OpenAIEmbeddings())
+    return vector_store.as_retriever()
+
+
+st.set_page_config(
+    page_title="SiteGPT",
+    page_icon="🖥️",
 )
 
 
-# ───────────────────────────────────── Retriever ─────────────────────────────────
-@st.cache_resource(show_spinner=True, ttl=24 * 3600)
-def get_retriever(products):
-    vectordb = build_or_load_chroma(products)
-    return vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 4})
-
-
-retriever = get_retriever(selected_products)
-
-# ───────────────────────────────────── QA Chain ──────────────────────────────────
-llm = ChatOpenAI(temperature=0)
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm, retriever=retriever, return_source_documents=True
+st.markdown(
+    """
+    # SiteGPT
+            
+    Ask questions about the content of a website.
+            
+    Start by writing the URL of the website on the sidebar.
+"""
 )
 
-# ───────────────────────────────────── Main Area ─────────────────────────────────
-st.title("Cloudflare Docs GPT 🤖")
-query = st.text_input("Cloudflare 공식 문서에 대해 질문하세요:")
 
-if query:
-    with st.spinner("답변 생성 중..."):
-        result = qa_chain(query)
-        st.subheader("📘 답변")
-        st.write(result["result"])
+with st.sidebar:
+    url = st.text_input(
+        "Write down a URL",
+        placeholder="https://example.com",
+    )
 
-        with st.expander("🔍 참고 문서"):
-            for doc in result["source_documents"]:
-                url = doc.metadata.get("source", "")
-                title = doc.metadata.get("title", url)
-                st.markdown(f"- [{title}]({url})")
 
-st.markdown("---")
-st.markdown("예시 질문:")
-st.markdown("- llama-2-7b-chat-fp16 모델의 1M 입력 토큰당 가격은 얼마인가요?")
-st.markdown("- Cloudflare의 AI 게이트웨이로 무엇을 할 수 있나요?")
-st.markdown("- 벡터라이즈에서 단일 계정은 몇 개의 인덱스를 가질 수 있나요?")
+if url:
+    if ".xml" not in url:
+        with st.sidebar:
+            st.error("Please write down a Sitemap URL.")
+    else:
+        retriever = load_website(url)
 
-st.caption(f"Index last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        chain = {
+            "docs": retriever,
+            "question": RunnablePassthrough(),
+        } | RunnableLambda(get_answers)
+
+        chain.invoke("What is the pricing of GPT-4 Turbo with vision.")
